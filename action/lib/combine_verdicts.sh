@@ -23,7 +23,11 @@
 #   An agent whose <NAME>_COLOR is empty is treated as "did not run" ->
 #   unverified, same fail-closed rule as everywhere else in this repo.
 # Also reads from env:
-#   PR_NUMBER        - the PR to comment on (skips posting, with a warning, if unset)
+#   PR_NUMBER        - the PR to comment on (skips posting, with a warning, if unset — the
+#                       shape a workflow_dispatch counsel run always takes, since there is no PR).
+#                       When unset, the rendered comment is ALSO appended to $GITHUB_STEP_SUMMARY
+#                       (issue #102) — the job log alone left the "job log/step summary" promise
+#                       in DESIGN.md's "counsel mode" section false.
 #   GH_TOKEN          - passed through to `gh pr comment`
 #   HEAD_SHA          - the reviewed PR head SHA, shown (short) in each agent's identity line
 #   POST_COMMENT      - "true"/"false"; "false" computes the result and prints it but posts
@@ -31,7 +35,14 @@
 #                       either way, via GITHUB_OUTPUT's overall_color below)
 #   APOLLO_DOCS_SKIPPED - "true"/"false"; synthesizes apollo's docs-only SKIPPED result since
 #                       there's no separate artifact-writing step in this flow to do it in
-# Writes: $GITHUB_OUTPUT's overall_color (green|yellow|red|unverified).
+#   MODE              - "gate" (default, if unset) or "counsel" (issue #95). Counsel mode
+#                       prepends an "advisory, not a gate" banner to `pantheon_render_comment`'s
+#                       own output before it's posted/printed — no new review logic, the SAME
+#                       renderer every lane calls, just framed for a lane that cannot block a
+#                       merge. Gate mode's own comment shape is completely unaffected: the banner
+#                       block below only ever executes when MODE is literally "counsel".
+# Writes: $GITHUB_OUTPUT's overall_color (green|yellow|red|unverified) — for counsel mode this is
+# purely informational (see action.yml's "Counsel result" step, which never fails on it).
 set -uo pipefail
 
 AGENTS="${1:?usage: combine_verdicts.sh <space-separated agent list>}"
@@ -89,7 +100,18 @@ done
 overall="$(pantheon_overall_color "${AGENT_LIST[@]}")"
 
 comment_file="$RUNNER_TEMP/pantheon-comment.md"
-pantheon_render_comment "${HEAD_SHA:-}" "${AGENT_LIST[@]}" > "$comment_file"
+: > "$comment_file"
+
+if [ "${MODE:-gate}" = "counsel" ]; then
+  {
+    echo "> **🔭 review-pantheon counsel — advisory, not a gate.**"
+    echo "> The three verdicts below are for the author to weigh, not a required check — this"
+    echo "> run cannot fail your CI and does not affect any gate's pass/fail result, whatever"
+    echo "> color they show."
+    echo
+  } > "$comment_file"
+fi
+pantheon_render_comment "${HEAD_SHA:-}" "${AGENT_LIST[@]}" >> "$comment_file"
 
 if [ "${POST_COMMENT:-true}" = "true" ]; then
   if [ -n "${PR_NUMBER:-}" ]; then
@@ -100,6 +122,17 @@ if [ "${POST_COMMENT:-true}" = "true" ]; then
   fi
 else
   echo "::notice::post_comment is false — computed the verdict but did not post a comment."
+fi
+
+# No PR exists to comment on (every workflow_dispatch counsel run — PR_NUMBER is always empty
+# there, regardless of POST_COMMENT) — issue #102's second finding. Before this, the rendered
+# verdict only reached the raw step log (via the `cat "$comment_file"` below), never
+# $GITHUB_STEP_SUMMARY, contradicting the "job log/step summary" promise DESIGN.md's "counsel
+# mode" section and this action's own `mode` input description make. Appended, not overwritten
+# ($GITHUB_STEP_SUMMARY is a running file other steps may also write to across the job) — this is
+# the ONLY place in this file that writes to it.
+if [ -z "${PR_NUMBER:-}" ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  cat "$comment_file" >> "$GITHUB_STEP_SUMMARY"
 fi
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
